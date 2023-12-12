@@ -1,1 +1,177 @@
+!pip install teradatasqlalchemy==17.0.0.5;
+!pip install sqlalchemy==1.4.44;
+import teradatasql
+from sqlalchemy import create_engine,Table, Column, Integer, String, Float, MetaData, ForeignKey,  insert, inspect
+import pandas as pd
+import numpy as np
+from bs4 import BeautifulSoup
+!pip install demoji
+import demoji
 
+
+# Conexion a teradata
+import teradatasql
+from sqlalchemy import create_engine,Table, Column, Integer, String, Float, MetaData, ForeignKey,  insert, inspect
+
+td_engine = create_engine('teradatasql://l0341304:Bakery199325.@galicia10n2.bancogalicia.com.ar/DBC?logmech=LDAP')
+inspector = inspect(td_engine)
+print(inspector)
+import warnings
+# Settings the warnings to be ignored
+warnings.filterwarnings('ignore')
+
+PERIODO='202312'
+
+query_mensajes=f'''
+select 
+mensaje_id, cuerpo_mensaje_tx from p_Dw_explo.smcc_mensajes
+where to_char(fecha_ts, 'yyyymm') = {PERIODO}
+group by 1,2
+'''
+con=td_engine.connect()
+con.execute(query_mensajes)
+df_mensajes = pd.DataFrame()
+temp = pd.read_sql(query_mensajes, con)
+df_mensajes = pd.concat((df_mensajes, temp), ignore_index=True)
+df_mensajes = df_mensajes.rename(columns=str.lower)
+
+dfAux=df_mensajes.copy()
+
+
+import re
+
+def clean_html(text):
+    # Remove HTML tags
+    cleaned_text = re.sub(r'<[^>]*>', '', text)
+    # Remove HTML entities
+    cleaned_text = re.sub(r'&[a-zA-Z]+;', ' ', cleaned_text)
+    # Remove HTML attributes
+    cleaned_text = re.sub(r'(\w+)\s*=\s*"[^"]*"', '', cleaned_text)
+    cleaned_text = cleaned_text.replace('�', '')
+    # Remove extra whitespace
+    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+    return cleaned_text
+
+dfAux["texto_limpio"]=''
+for i in range(len(dfAux)):
+    dfAux["texto_limpio"][i]=clean_html(dfAux.cuerpo_mensaje_tx[i])
+dfFinal=dfAux.copy()
+
+
+#Limpiamos caracteres desconocidos de los mensajes y luego unimos los mensajes que corresponden a un unico caso en solo una celda
+x=''
+df_nuevo=pd.DataFrame()
+df_nuevo["mensaje_id"]=dfFinal["mensaje_id"].unique()
+df_nuevo["mensaje"]=''
+j=0
+for i in df_nuevo["mensaje_id"]:
+    x=dfFinal.loc[dfFinal["mensaje_id"]==i, "texto_limpio"]
+    df_nuevo["mensaje"][j]=x.str.cat(sep=". ").replace('�','')
+    j=j+1
+    
+#creamos la funcion parserMensajes que va a recibir un texto para limpiar el codigo HTML
+def parserMensajes(i):
+    noHtml = []
+    soup = BeautifulSoup(str(i).replace('>','> '))
+    noHtml.append(soup.get_text())
+    return noHtml
+
+#Creamos una funcion listaLimpia que vaya guardando cada mensaje_id y el texto del msj sin el codigo HTML
+listaLimpia = []
+for x in range(1,df_nuevo.shape[0]):
+    v_mensaje_id=df_nuevo.iloc[x:x+1].mensaje_id.tolist()
+    emails = df_nuevo.iloc[x:x+1].mensaje.tolist()
+    v_mensaje_limpio=parserMensajes(emails)
+    listaLimpia.append([v_mensaje_id ,v_mensaje_limpio])
+
+#Convertimos la lista en un dataframe y le asignamos los nombres de columna correspondiente
+df6 = pd.DataFrame(listaLimpia, columns=["mensaje_id", "mensaje"])
+
+#Removemos los primeros corchetes ya que teniamos una lista de listas
+df6["mensaje_id"]=df6["mensaje_id"].str[0]
+df6.mensaje=df6.mensaje.str[0]
+
+#Removemos la segunda linea de corchetes para que quede el texto limpio
+df6.mensaje=df6.mensaje.str.replace("'", " ")
+df6.mensaje=df6.mensaje.str.strip('[')
+df6.mensaje=df6.mensaje.str.strip(']')
+#removemos saltos de linea (literales) y caracteres raros
+df6.replace(r'\\n', " ", regex=True, inplace=True)
+df6.replace(r'\\r', " ", regex=True, inplace=True)
+df6.replace(r'\\xa0', " ", regex=True, inplace=True)
+df6.replace(r'\\xa0', " ", regex=True, inplace=True)
+df6.replace(r'\\x1a Â', " ", regex=True, inplace=True)
+df6.replace(r'\\x1a', " ", regex=True, inplace=True)
+#Corregimos palabras con acento
+df6.replace(r'Ã¡', "a", regex=True, inplace=True)
+df6.replace(r'Ã©', "e", regex=True, inplace=True)
+df6.replace(r'Ã-', "i", regex=True, inplace=True)
+df6.replace(r'Ã³', "o", regex=True, inplace=True)
+df6.replace(r'Ãº', "u", regex=True, inplace=True)
+df6.replace(r'Ã±', "n", regex=True, inplace=True) 
+df6.replace(r'Â', "n", regex=True, inplace=True)
+df6.replace(r'\xa0', " ", regex=True, inplace=True)
+df6.replace(r'\u200c', " ", regex=True, inplace=True)
+df6.replace(r'\\t', " ", regex=True, inplace=True)
+df6.replace(r"•", "", regex=True, inplace=True)
+
+patron_saltos_de_linea=re.compile("\\n", re.IGNORECASE)
+patron_saltos_de_linea2=re.compile("\\r", re.IGNORECASE)
+
+
+
+def remove_emojis(text):
+    demoji.download_codes()  # Downloads the emoji codes, only needs to be done once
+
+    return demoji.replace(text, '')
+
+for i in range (0,len(df6)):
+    df6["mensaje"][i]=re.sub(patron_saltos_de_linea, "",df6["mensaje"][i])
+    df6["mensaje"][i]=re.sub(patron_saltos_de_linea2, "",df6["mensaje"][i])
+    df6["mensaje"][i]=remove_emojis(df6["mensaje"][i])
+    df6["mensaje"][i]=str(df6["mensaje"][i]).replace('\u202f', " ")
+    
+x=''
+ediciones=[]
+for i in range(0, len(df6)):
+    #reemplazamos letras con acento por sin acento
+    x=df6["mensaje"][i].lower().replace('ó', 'o').replace('á', 'a').replace('é', 'e').replace('í', 'i').replace('ú', 'u').replace('ñ', 'ni')
+    ediciones.append(x)
+df6["mensaje_editado"]=np.array(ediciones)
+
+dfFinal=df6[["mensaje_id", "mensaje_editado"]].copy()
+dfFinal.rename(columns={"mensaje_editado":"texto_limpio"}, inplace=True)
+dfFinal["periodo"]=PERIODO
+
+
+# Usuario TD
+#td_engine = create_engine('teradatasql://l0341304:Hawaii199325.@galicia10n2.bancogalicia.com.ar/DBC?logmech=LDAP')
+
+## Borramos los datos que esten cargados previamente en el periodo de entrenamiento que corrimos arriba (en teradata)
+#query_delete= f"delete from sbx_ccc.resultados_perfilado_anual_adicionales where periodo= {periodo}"
+
+# Define the metadata for your table
+#si no ponemos el schema, se guarda una temporal
+metadata = MetaData(schema='sbx_ccc')
+
+# Create an instance of the Table object
+my_table = Table('yoizen_mensajes_limpios ', metadata,
+                 Column('mensaje_id', String),
+                 Column('texto_limpio', String),
+                 Column('periodo', String)
+                )
+
+# Create an instance of the Insert object
+ins = insert(my_table)
+
+
+##Insercion
+
+# Insercion en tabla
+with td_engine.connect() as conn:  
+    # Eliminamos en caso de existir registros con misma fecha
+    conn.execute(f" DEL sbx_ccc.yoizen_mensajes_limpios where periodo = {PERIODO}")
+    # Insertamos nuevos registros
+    #conn.execute(query_delete)
+    new_rows = dfFinal[["mensaje_id", "texto_limpio", "periodo"]].to_dict('records')
+    conn.execute(ins, new_rows)
